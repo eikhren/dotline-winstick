@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain, screen, dialog, globalShortcut } from "electron"
+import { app, shell, BrowserWindow, ipcMain, screen, dialog } from "electron"
 import type { SaveDialogOptions, OpenDialogOptions } from "electron"
 import { join } from "path"
 import { electronApp, optimizer, is } from "@electron-toolkit/utils"
@@ -8,10 +8,12 @@ import "./rpc"
 import { promises as fs } from "fs"
 import { initAutoUpdater, triggerAutoUpdateCheck } from "./updater"
 import { CrosshairConfig, CrosshairStyle, defaultConfig } from "@/types/crosshair"
+import { WindowAttachService, registerWindowAttachIPC } from "./windowAttach"
 
 let settingsWindow: BrowserWindow | null = null
 let overlayWindow: BrowserWindow | null = null
 let currentOverlayDisplayId: number | null = null
+let windowAttachService: WindowAttachService | null = null
 
 function createSettingsWindow(): void {
   settingsWindow = new BrowserWindow({
@@ -86,6 +88,9 @@ function createOverlayWindow(): void {
       const b = target?.bounds ?? { x, y, width, height }
       overlayWindow?.setBounds({ x: b.x, y: b.y, width: b.width, height: b.height })
     } catch {}
+    try {
+      overlayWindow?.setTitle("DotlineOverlay")
+    } catch {}
     overlayWindow?.setIgnoreMouseEvents(true, { forward: true })
     overlayWindow?.showInactive()
   })
@@ -104,6 +109,10 @@ function createOverlayWindow(): void {
   }
 
   screen.on("display-metrics-changed", () => {
+    if (windowAttachService && windowAttachService.getState().mode !== "detached") {
+      // When attached or following, geometry is driven by WindowAttachService
+      return
+    }
     if (!overlayWindow) return
     const target = currentOverlayDisplayId
       ? screen.getAllDisplays().find((d) => d.id === currentOverlayDisplayId)
@@ -131,11 +140,13 @@ app.whenReady().then(() => {
   createSettingsWindow()
   createOverlayWindow()
 
-  // Register global shortcut to toggle crosshair
-  globalShortcut.register("CommandOrControl+Shift+X", () => {
-    console.log("Pressed")
-    settingsWindow?.webContents.send("toggle-crosshair")
+  // Initialize WindowAttachService (X11 gated)
+  windowAttachService = new WindowAttachService(() => overlayWindow, {
+    pollMs: 100,
+    enabled:
+      process.platform === "linux" && (process.env["XDG_SESSION_TYPE"] ?? "").toLowerCase() === "x11"
   })
+  registerWindowAttachIPC(windowAttachService)
 
   // Initialize auto updater and perform a background check
   initAutoUpdater(() => settingsWindow)
@@ -163,7 +174,6 @@ app.whenReady().then(() => {
 // for applications and their menu bar to stay active until the user quits
 // explicitly with Cmd + Q.
 app.on("window-all-closed", () => {
-  globalShortcut.unregisterAll()
   if (process.platform !== "darwin") {
     app.quit()
   }
@@ -179,10 +189,6 @@ if (!gotLock) {
       if (settingsWindow.isMinimized()) settingsWindow.restore()
       settingsWindow.focus()
     }
-  })
-
-  app.on("before-quit", () => {
-    globalShortcut.unregisterAll()
   })
 }
 
